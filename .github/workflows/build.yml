@@ -1,0 +1,76 @@
+name: Build IPA (Direct Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    # 增加写入权限，这是发布 Release 必须的
+    permissions:
+      contents: write 
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Xcode 环境
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer || true
+
+      - name: 预处理与清理 (修复你的代码环境)
+        run: |
+          # 1. 自动解压你上传的源码包
+          find . -maxdepth 2 -iname "*.zip" -exec unzip -o -q "{}" \;
+          
+          # 2. 定位源码目录
+          SUB_PKG=$(find . -mindepth 2 -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1)
+          if [ -n "$SUB_PKG" ]; then 
+            cd "$SUB_PKG"
+          else 
+            cd "$(find . -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1 || echo .)"
+          fi
+
+          # 3. 清理冲突文件并修正语法
+          find . -name "Assets.xcassets" | tail -n +2 | while read -r dup; do rm -rf "$dup"; done
+          find . -name "*.swift" -exec sed -i '' 's/\.topBarLeading/\.navigationBarLeading/g' {} +
+          
+          # 4. 强制修正系统版本，避免 26.0 的灾难！统一改成 17.0
+          find . -name "Package.swift" -exec sed -i '' 's/\.iOS("26.0")/\.iOS("17.0")/g' {} +
+          find . -name "Package.swift" -exec sed -i '' 's/\.iOS("16.0")/\.iOS("17.0")/g' {} +
+
+      - name: 开始云端编译
+        run: |
+          # 进入正确的包目录
+          cd "$(find . -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1 || echo .)"
+          
+          SCHEME=$(xcodebuild -list 2>/dev/null | awk '/Schemes:/{flag=1;next} flag && NF{print $1; exit}')
+          if [ -z "$SCHEME" ]; then SCHEME="You"; fi
+          echo "正在编译 Scheme: $SCHEME"
+
+          # 核心编译命令 (无签名模式)
+          xcodebuild build \
+            -scheme "$SCHEME" \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 
+            
+          # 提取 App 并打包成 ipa
+          mkdir -p Payload
+          APP_PATH=$(find ./build -name "*.app" | head -n 1)
+          cp -r "$APP_PATH" Payload/
+          zip -r output.ipa Payload
+          
+          # 把生成的 ipa 移到根目录，准备发布
+          mv output.ipa $GITHUB_WORKSPACE/You.ipa
+
+      - name: 🚀 发布直装版 IPA 到 Releases (免解压！)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.${{ github.run_number }}"
+          name: "最新编译直装版 (直接下载 IPA)"
+          files: You.ipa
+          token: ${{ secrets.GITHUB_TOKEN }}
